@@ -242,6 +242,35 @@ function buildVolumeMounts(
   return mounts;
 }
 
+/**
+ * Snap-confined Docker cannot access /tmp. The OneCLI SDK writes CA certs
+ * there, so we copy them into DATA_DIR and rewrite the -v args in place.
+ */
+function relocateTmpMounts(args: string[]): void {
+  const caDir = path.join(DATA_DIR, 'onecli-ca');
+  fs.mkdirSync(caDir, { recursive: true });
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== '-v') continue;
+    const mount = args[i + 1];
+    if (!mount) continue;
+
+    // Match host-side /tmp/onecli-* paths in volume mounts
+    const match = mount.match(/^(\/tmp\/onecli-[^:]+):(.+)$/);
+    if (!match) continue;
+
+    const [, tmpPath, rest] = match;
+    const basename = path.basename(tmpPath);
+    const newPath = path.join(caDir, basename);
+    try {
+      fs.copyFileSync(tmpPath, newPath);
+      args[i + 1] = `${newPath}:${rest}`;
+    } catch {
+      // If copy fails, leave the original mount in place
+    }
+  }
+}
+
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -259,6 +288,9 @@ async function buildContainerArgs(
     agent: agentIdentifier,
   });
   if (onecliApplied) {
+    // The SDK writes CA certs to /tmp which is inaccessible to snap-confined
+    // Docker. Relocate any /tmp/onecli-* volume mounts to DATA_DIR.
+    relocateTmpMounts(args);
     logger.info({ containerName }, 'OneCLI gateway config applied');
   } else {
     logger.warn(
